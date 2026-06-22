@@ -1,0 +1,497 @@
+<#
+    .SYNOPSIS
+    QRToken-GUI-Secure.ps1 - Generateur QR Code PRO
+    
+    UTILISATION:
+    Copier dans C:\qrcode_maker_3.0\
+    Lancer: .\QRToken-GUI-Secure.ps1
+    
+    Structure requise:
+    C:\qrcode_maker_3.0\
+    ├── QRToken-GUI-Secure.ps1  (ce fichier)
+    └── lib\
+        └── QRCoder.dll
+#>
+
+# Se mettre dans le répertoire du script
+if ($PSScriptRoot) {
+    Set-Location $PSScriptRoot
+} else {
+    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+    if ($scriptDir) { Set-Location $scriptDir }
+}
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+$DefaultPixelSize = 10
+
+# ==============================================================================
+# FONCTIONS
+# ==============================================================================
+
+function Detect-CsvDelimiter {
+    param([string]$FilePath)
+    try {
+        $firstLine = Get-Content $FilePath -TotalCount 1 -Encoding UTF8
+        if ($firstLine -like "*;*") { return ";" }
+        if ($firstLine -like "*,*") { return "," }
+        if ($firstLine -like "*`t*") { return "`t" }
+        return ";"
+    }
+    catch { return ";" }
+}
+
+function Initialize-QRLibrary {
+    try {
+        $dllPath = ".\lib\QRCoder.dll"
+        if (Test-Path $dllPath) {
+            [Reflection.Assembly]::LoadFrom((Resolve-Path $dllPath).Path) | Out-Null
+            return $true
+        }
+        return $false
+    }
+    catch { return $false }
+}
+
+function New-QRCodePng {
+    param([string]$Text, [string]$FilePath, [int]$PixelSize)
+    
+    try {
+        $gen = New-Object QRCoder.QRCodeGenerator
+        
+        # Essayer différentes syntaxes pour ECCLevel
+        try {
+            $qr = $gen.CreateQrCode($Text, [QRCoder.QRCodeGenerator+ECCLevel]::Q)
+        }
+        catch {
+            $qr = $gen.CreateQrCode($Text, 1)
+        }
+        
+        $png = New-Object QRCoder.PngByteQRCode -ArgumentList $qr
+        $bytes = $png.GetGraphic($PixelSize)
+        
+        [IO.File]::WriteAllBytes($FilePath, $bytes)
+        return $true
+    }
+    catch { return $false }
+}
+
+function Get-SafeFileName {
+    param([string]$Text)
+    $text = $text -replace '[^\w\s\-\.]', ''
+    $text = $text -replace '\s+', '_'
+    $text = $text.Substring(0, [Math]::Min(100, $text.Length))
+    return $text
+}
+
+function Write-Log {
+    param([string]$Message)
+    $timestamp = Get-Date -Format "HH:mm:ss"
+    $txtLog.AppendText("[$timestamp] $Message`n")
+    $txtLog.ScrollToCaret()
+}
+
+# ==============================================================================
+# INITIALISATION
+# ==============================================================================
+
+if (-not (Initialize-QRLibrary)) {
+    [System.Windows.Forms.MessageBox]::Show("ERREUR: QRCoder.dll introuvable`n`nVerifier: .\lib\QRCoder.dll", "Erreur") | Out-Null
+    exit
+}
+
+# ==============================================================================
+# INTERFACE
+# ==============================================================================
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "QRToken Generator PRO"
+$form.Size = New-Object System.Drawing.Size(900, 650)
+$form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+# === SLIDER TAILLE ===
+$grpSize = New-Object System.Windows.Forms.GroupBox
+$grpSize.Text = "Taille du QR Code"
+$grpSize.Location = New-Object System.Drawing.Point(15, 10)
+$grpSize.Size = New-Object System.Drawing.Size(870, 50)
+$form.Controls.Add($grpSize)
+
+$lblSize = New-Object System.Windows.Forms.Label
+$lblSize.Text = "Taille:"
+$lblSize.Location = New-Object System.Drawing.Point(10, 20)
+$lblSize.Size = New-Object System.Drawing.Size(50, 20)
+$grpSize.Controls.Add($lblSize)
+
+$trackSize = New-Object System.Windows.Forms.TrackBar
+$trackSize.Location = New-Object System.Drawing.Point(65, 20)
+$trackSize.Size = New-Object System.Drawing.Size(300, 20)
+$trackSize.Minimum = 5
+$trackSize.Maximum = 20
+$trackSize.Value = $DefaultPixelSize
+$grpSize.Controls.Add($trackSize)
+
+$lblSizeValue = New-Object System.Windows.Forms.Label
+$lblSizeValue.Text = "10px"
+$lblSizeValue.Location = New-Object System.Drawing.Point(370, 20)
+$lblSizeValue.Size = New-Object System.Drawing.Size(80, 20)
+$lblSizeValue.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$grpSize.Controls.Add($lblSizeValue)
+
+$trackSize.Add_Scroll({
+    $lblSizeValue.Text = "$($trackSize.Value)px"
+})
+
+# === TABS ===
+$tabControl = New-Object System.Windows.Forms.TabControl
+$tabControl.Location = New-Object System.Drawing.Point(15, 70)
+$tabControl.Size = New-Object System.Drawing.Size(870, 560)
+$form.Controls.Add($tabControl)
+
+# ============ TAB 1: CSV ============
+$tabCSV = New-Object System.Windows.Forms.TabPage
+$tabCSV.Text = "Mode CSV"
+$tabControl.TabPages.Add($tabCSV)
+
+$grpCSV = New-Object System.Windows.Forms.GroupBox
+$grpCSV.Text = "1. Charger CSV"
+$grpCSV.Location = New-Object System.Drawing.Point(10, 10)
+$grpCSV.Size = New-Object System.Drawing.Size(840, 60)
+$tabCSV.Controls.Add($grpCSV)
+
+$txtCsv = New-Object System.Windows.Forms.TextBox
+$txtCsv.Location = New-Object System.Drawing.Point(10, 30)
+$txtCsv.Size = New-Object System.Drawing.Size(750, 22)
+$txtCsv.ReadOnly = $true
+$grpCSV.Controls.Add($txtCsv)
+
+$btnLoadCsv = New-Object System.Windows.Forms.Button
+$btnLoadCsv.Text = "Charger"
+$btnLoadCsv.Location = New-Object System.Drawing.Point(765, 30)
+$btnLoadCsv.Size = New-Object System.Drawing.Size(65, 22)
+$grpCSV.Controls.Add($btnLoadCsv)
+
+$grpCol = New-Object System.Windows.Forms.GroupBox
+$grpCol.Text = "2. Mapper colonnes"
+$grpCol.Location = New-Object System.Drawing.Point(10, 80)
+$grpCol.Size = New-Object System.Drawing.Size(840, 60)
+$tabCSV.Controls.Add($grpCol)
+
+$combos = @{}
+$x = 10
+foreach ($k in @('Nom', 'Email', 'Token')) {
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = "$($k):"
+    $lbl.Location = New-Object System.Drawing.Point($x, 25)
+    $lbl.Size = New-Object System.Drawing.Size(45, 20)
+    $grpCol.Controls.Add($lbl)
+    
+    $cmb = New-Object System.Windows.Forms.ComboBox
+    $cmb.Location = New-Object System.Drawing.Point(($x + 45), 25)
+    $cmb.Size = New-Object System.Drawing.Size(150, 22)
+    $cmb.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $grpCol.Controls.Add($cmb)
+    $combos[$k] = $cmb
+    
+    $x = $x + 210
+}
+
+$grpOut = New-Object System.Windows.Forms.GroupBox
+$grpOut.Text = "3. Dossier de sortie"
+$grpOut.Location = New-Object System.Drawing.Point(10, 150)
+$grpOut.Size = New-Object System.Drawing.Size(840, 60)
+$tabCSV.Controls.Add($grpOut)
+
+$txtOut = New-Object System.Windows.Forms.TextBox
+$txtOut.Location = New-Object System.Drawing.Point(10, 30)
+$txtOut.Size = New-Object System.Drawing.Size(750, 22)
+$grpOut.Controls.Add($txtOut)
+
+$btnBrowseOut = New-Object System.Windows.Forms.Button
+$btnBrowseOut.Text = "Parcourir"
+$btnBrowseOut.Location = New-Object System.Drawing.Point(765, 30)
+$btnBrowseOut.Size = New-Object System.Drawing.Size(65, 22)
+$grpOut.Controls.Add($btnBrowseOut)
+
+$grpActCSV = New-Object System.Windows.Forms.GroupBox
+$grpActCSV.Text = "4. Actions"
+$grpActCSV.Location = New-Object System.Drawing.Point(10, 220)
+$grpActCSV.Size = New-Object System.Drawing.Size(840, 200)
+$tabCSV.Controls.Add($grpActCSV)
+
+$btnGenCSV = New-Object System.Windows.Forms.Button
+$btnGenCSV.Text = "GENERER les QR"
+$btnGenCSV.Location = New-Object System.Drawing.Point(10, 25)
+$btnGenCSV.Size = New-Object System.Drawing.Size(150, 35)
+$btnGenCSV.BackColor = [System.Drawing.Color]::LimeGreen
+$btnGenCSV.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$btnGenCSV.Enabled = $false
+$grpActCSV.Controls.Add($btnGenCSV)
+
+$btnPurge = New-Object System.Windows.Forms.Button
+$btnPurge.Text = "Purger"
+$btnPurge.Location = New-Object System.Drawing.Point(170, 25)
+$btnPurge.Size = New-Object System.Drawing.Size(80, 35)
+$btnPurge.BackColor = [System.Drawing.Color]::LightCoral
+$btnPurge.Enabled = $false
+$grpActCSV.Controls.Add($btnPurge)
+
+$txtLog = New-Object System.Windows.Forms.TextBox
+$txtLog.Multiline = $true
+$txtLog.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+$txtLog.Location = New-Object System.Drawing.Point(10, 70)
+$txtLog.Size = New-Object System.Drawing.Size(820, 120)
+$txtLog.ReadOnly = $true
+$txtLog.Font = New-Object System.Drawing.Font("Courier New", 8)
+$grpActCSV.Controls.Add($txtLog)
+
+# ============ TAB 2: TEXTE LIBRE ============
+$tabText = New-Object System.Windows.Forms.TabPage
+$tabText.Text = "Mode Texte Libre"
+$tabControl.TabPages.Add($tabText)
+
+# Diviseur gauche-droite
+$grpCodeInput = New-Object System.Windows.Forms.GroupBox
+$grpCodeInput.Text = "Codes (un par ligne)"
+$grpCodeInput.Location = New-Object System.Drawing.Point(10, 10)
+$grpCodeInput.Size = New-Object System.Drawing.Size(420, 150)
+$tabText.Controls.Add($grpCodeInput)
+
+$txtInput = New-Object System.Windows.Forms.TextBox
+$txtInput.Multiline = $true
+$txtInput.WordWrap = $true
+$txtInput.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+$txtInput.Location = New-Object System.Drawing.Point(10, 25)
+$txtInput.Size = New-Object System.Drawing.Size(400, 115)
+$grpCodeInput.Controls.Add($txtInput)
+
+$grpPreview = New-Object System.Windows.Forms.GroupBox
+$grpPreview.Text = "Apercu"
+$grpPreview.Location = New-Object System.Drawing.Point(440, 10)
+$grpPreview.Size = New-Object System.Drawing.Size(410, 150)
+$tabText.Controls.Add($grpPreview)
+
+$lstPreview = New-Object System.Windows.Forms.ListBox
+$lstPreview.Location = New-Object System.Drawing.Point(10, 25)
+$lstPreview.Size = New-Object System.Drawing.Size(390, 115)
+$lstPreview.Font = New-Object System.Drawing.Font("Courier New", 8)
+$grpPreview.Controls.Add($lstPreview)
+
+$grpTextInfo = New-Object System.Windows.Forms.GroupBox
+$grpTextInfo.Text = "Noms personnalises (optionnel)"
+$grpTextInfo.Location = New-Object System.Drawing.Point(10, 170)
+$grpTextInfo.Size = New-Object System.Drawing.Size(840, 80)
+$tabText.Controls.Add($grpTextInfo)
+
+$lblTextNames = New-Object System.Windows.Forms.Label
+$lblTextNames.Text = "Noms (un par ligne, ou laissez vide pour auto):"
+$lblTextNames.Location = New-Object System.Drawing.Point(10, 20)
+$lblTextNames.Size = New-Object System.Drawing.Size(820, 15)
+$grpTextInfo.Controls.Add($lblTextNames)
+
+$txtNames = New-Object System.Windows.Forms.TextBox
+$txtNames.Location = New-Object System.Drawing.Point(10, 40)
+$txtNames.Size = New-Object System.Drawing.Size(820, 30)
+$txtNames.Multiline = $true
+$txtNames.Font = New-Object System.Drawing.Font("Segoe UI", 8)
+$grpTextInfo.Controls.Add($txtNames)
+
+$grpActText = New-Object System.Windows.Forms.GroupBox
+$grpActText.Text = "Dossier de sortie"
+$grpActText.Location = New-Object System.Drawing.Point(10, 260)
+$grpActText.Size = New-Object System.Drawing.Size(840, 70)
+$tabText.Controls.Add($grpActText)
+
+$txtOutText = New-Object System.Windows.Forms.TextBox
+$txtOutText.Location = New-Object System.Drawing.Point(10, 25)
+$txtOutText.Size = New-Object System.Drawing.Size(740, 22)
+$grpActText.Controls.Add($txtOutText)
+
+$btnBrowseOutText = New-Object System.Windows.Forms.Button
+$btnBrowseOutText.Text = "Parcourir"
+$btnBrowseOutText.Location = New-Object System.Drawing.Point(755, 25)
+$btnBrowseOutText.Size = New-Object System.Drawing.Size(75, 22)
+$grpActText.Controls.Add($btnBrowseOutText)
+
+$btnGenText = New-Object System.Windows.Forms.Button
+$btnGenText.Text = "GENERER les QR"
+$btnGenText.Location = New-Object System.Drawing.Point(10, 350)
+$btnGenText.Size = New-Object System.Drawing.Size(150, 35)
+$btnGenText.BackColor = [System.Drawing.Color]::LimeGreen
+$btnGenText.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$btnGenText.Enabled = $false
+$tabText.Controls.Add($btnGenText)
+
+# ==============================================================================
+# EVENEMENTS
+# ==============================================================================
+$script:donnees = $null
+
+# === CSV ===
+$btnLoadCsv.Add_Click({
+    $ofd = New-Object System.Windows.Forms.OpenFileDialog
+    $ofd.Filter = "CSV (*.csv)|*.csv"
+    if ($ofd.ShowDialog() -ne 'OK') { return }
+    
+    $txtCsv.Text = $ofd.FileName
+    $delimiter = Detect-CsvDelimiter -FilePath $ofd.FileName
+    $delimName = if ($delimiter -eq ';') { 'Virgule' } elseif ($delimiter -eq ',') { 'Virgule' } else { 'TAB' }
+    
+    try {
+        $script:donnees = @(Import-Csv -Path $ofd.FileName -Delimiter $delimiter -Encoding UTF8)
+    }
+    catch {
+        $script:donnees = @(Import-Csv -Path $ofd.FileName -Delimiter $delimiter)
+    }
+    
+    if ($script:donnees.Count -eq 0) {
+        Write-Log "ERREUR CSV vide"
+        return
+    }
+    
+    $colonnes = @($script:donnees[0].PSObject.Properties.Name)
+    foreach ($k in $combos.Keys) {
+        $combos[$k].Items.Clear()
+        $combos[$k].Items.AddRange($colonnes)
+        $match = $colonnes | Where-Object { $_ -match $k } | Select-Object -First 1
+        if ($match) { $combos[$k].SelectedItem = $match }
+    }
+    
+    $btnGenCSV.Enabled = $true
+    Write-Log "OK $($script:donnees.Count) lignes | Delimiter: $delimName"
+})
+
+$btnBrowseOut.Add_Click({
+    $fbd = New-Object System.Windows.Forms.FolderBrowserDialog
+    if ($fbd.ShowDialog() -eq 'OK') { $txtOut.Text = $fbd.SelectedPath }
+})
+
+$btnGenCSV.Add_Click({
+    if (-not $txtOut.Text -or -not (Test-Path $txtOut.Text)) {
+        Write-Log "ERREUR Dossier invalide"
+        return
+    }
+    
+    $pixelSize = $trackSize.Value
+    $generated = 0
+    $failed = 0
+    
+    Write-Log "--- Generation (taille: ${pixelSize}px) ---"
+    
+    foreach ($i in 0..($script:donnees.Count - 1)) {
+        $row = $script:donnees[$i]
+        $token = $row.($combos['Token'].SelectedItem)
+        $email = $row.($combos['Email'].SelectedItem)
+        
+        if ([string]::IsNullOrWhiteSpace($token)) {
+            $failed++
+            Write-Log "[$($i+1)] Token vide"
+            continue
+        }
+        
+        $filename = Get-SafeFileName $email
+        $filepath = Join-Path $txtOut.Text "$filename.png"
+        
+        if (New-QRCodePng -Text $token -FilePath $filepath -PixelSize $pixelSize) {
+            $generated++
+            Write-Log "OK [$($i+1)] $filename.png"
+        } else {
+            $failed++
+            Write-Log "ERR [$($i+1)] $filename.png"
+        }
+    }
+    
+    Write-Log "--- Fini: $generated OK, $failed ERR ---"
+    [System.Windows.Forms.MessageBox]::Show("$generated generes, $failed erreurs", "Resume") | Out-Null
+    $btnPurge.Enabled = $true
+})
+
+# === TEXTE LIBRE ===
+$btnBrowseOutText.Add_Click({
+    $fbd = New-Object System.Windows.Forms.FolderBrowserDialog
+    $fbd.SelectedPath = if ($txtOutText.Text) { Split-Path $txtOutText.Text } else { (Get-Location).Path }
+    if ($fbd.ShowDialog() -eq 'OK') { 
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $txtOutText.Text = Join-Path $fbd.SelectedPath "QR_export_$timestamp"
+    }
+})
+
+# Mettre à jour la preview quand on tape
+$txtInput.Add_TextChanged({
+    $lstPreview.Items.Clear()
+    $codes = $txtInput.Text -split "`n" | Where-Object { [string]::IsNullOrWhiteSpace($_) -eq $false }
+    $lstPreview.Items.Add("$($codes.Count) codes detectes")
+    $lstPreview.Items.Add("")
+    foreach ($i in 0..([Math]::Min(9, $codes.Count - 1))) {
+        $code = ([string]$codes[$i]).Trim()
+        if ($code.Length -gt 30) { $code = $code.Substring(0, 27) + "..." }
+        $lstPreview.Items.Add("[$($i+1)] $code")
+    }
+    if ($codes.Count -gt 10) {
+        $lstPreview.Items.Add("... +$($codes.Count - 10) codes")
+    }
+})
+
+# Initialiser le dossier de sortie au démarrage
+$script:firstTimeText = $true
+$tabControl.Add_SelectedIndexChanged({
+    if ($tabControl.SelectedTab -eq $tabText -and $script:firstTimeText) {
+        $script:firstTimeText = $false
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $scriptPath = (Get-Location).Path
+        $txtOutText.Text = Join-Path $scriptPath "QR_export_$timestamp"
+    }
+})
+
+$btnGenText.Add_Click({
+    if (-not $txtOutText.Text) {
+        Write-Log "ERREUR Aucun dossier de sortie"
+        return
+    }
+    
+    # Créer le dossier s'il n'existe pas
+    if (-not (Test-Path $txtOutText.Text)) {
+        mkdir $txtOutText.Text -Force | Out-Null
+    }
+    
+    $codes = @($txtInput.Text -split "`n" | Where-Object { [string]::IsNullOrWhiteSpace($_) -eq $false })
+    $names = @($txtNames.Text -split "`n" | Where-Object { [string]::IsNullOrWhiteSpace($_) -eq $false })
+    
+    if ($codes.Count -eq 0) {
+        Write-Log "ERREUR Aucun code"
+        return
+    }
+    
+    $pixelSize = $trackSize.Value
+    $generated = 0
+    
+    Write-Log "--- Generation ($($codes.Count) codes, taille: ${pixelSize}px) ---"
+    Write-Log "Dossier: $($txtOutText.Text)"
+    
+    for ($i = 0; $i -lt $codes.Count; $i++) {
+        $code = [string]$codes[$i]
+        $code = $code.Trim()
+        $filename = if ($i -lt $names.Count) { ([string]$names[$i]).Trim() } else { "qr_$([string]::Format('{0:D3}', $i + 1))" }
+        
+        if ([string]::IsNullOrWhiteSpace($filename)) {
+            $filename = "qr_$([string]::Format('{0:D3}', $i + 1))"
+        }
+        
+        $filepath = Join-Path $txtOutText.Text "$filename.png"
+        
+        if (New-QRCodePng -Text $code -FilePath $filepath -PixelSize $pixelSize) {
+            $generated++
+            if ($i -lt 10 -or $i % 5 -eq 0) {
+                Write-Log "[$($i+1)] $filename.png"
+            }
+        }
+    }
+    
+    Write-Log "--- $generated QR codes generes dans $($txtOutText.Text) ---"
+    [System.Windows.Forms.MessageBox]::Show("$generated codes generes`nDossier: $($txtOutText.Text)", "Success") | Out-Null
+})
+
+$txtInput.Add_TextChanged({ $btnGenText.Enabled = $txtOutText.Text -and $txtInput.Text.Length -gt 0 })
+
+$form.ShowDialog() | Out-Null
