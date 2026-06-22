@@ -1,0 +1,144 @@
+<#
+    .SYNOPSIS
+    Test-QRCoderDLL.ps1
+    Diagnostic complet du chargement QRCoder.dll
+#>
+
+Write-Host "╔════════════════════════════════════════════════════════╗"
+Write-Host "║         TEST QRCODER.DLL - DIAGNOSTIC                ║"
+Write-Host "╚════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+
+Write-Host ""
+Write-Host "1. VERIFIER EXISTENCE DU FICHIER" -ForegroundColor Yellow
+Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+$dllPath = ".\lib\QRCoder.dll"
+$dllAbsolute = (Resolve-Path $dllPath -ErrorAction SilentlyContinue).Path
+
+Write-Host "Chemin relatif : $dllPath"
+Write-Host "Chemin absolu  : $dllAbsolute"
+Write-Host "Répertoire actuel : $(Get-Location)"
+
+if (Test-Path $dllPath) {
+    Write-Host "✓ Fichier EXISTE" -ForegroundColor Green
+    
+    $fileInfo = Get-Item $dllPath
+    Write-Host "   Taille : $($fileInfo.Length) bytes"
+    Write-Host "   Modifié : $($fileInfo.LastWriteTime)"
+    Write-Host "   Chemin complet : $($fileInfo.FullName)"
+}
+else {
+    Write-Host "✗ Fichier INTROUVABLE" -ForegroundColor Red
+    Write-Host "   Chercher dans :" -ForegroundColor Yellow
+    Get-ChildItem -Path "." -Recurse -Filter "QRCoder.dll" -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host "   → Trouvé: $($_.FullName)"
+    }
+    Write-Host ""
+    Write-Host "SOLUTION: Créer le dossier lib et y mettre QRCoder.dll" -ForegroundColor Yellow
+    exit 1
+}
+
+Write-Host ""
+Write-Host "2. VÉRIFIER PERMISSIONS D'ACCÈS" -ForegroundColor Yellow
+Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+try {
+    $stream = [System.IO.File]::OpenRead($dllPath)
+    $stream.Close()
+    Write-Host "✓ Fichier LISIBLE" -ForegroundColor Green
+}
+catch {
+    Write-Host "✗ Erreur d'accès au fichier :" -ForegroundColor Red
+    Write-Host "   $($_.Exception.Message)"
+    exit 1
+}
+
+Write-Host ""
+Write-Host "3. VÉRIFIER VERSION .NET" -ForegroundColor Yellow
+Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+Write-Host "PowerShell : $($PSVersionTable.PSVersion)"
+Write-Host ".NET Framework : $([System.Runtime.InteropServices.RuntimeInformation]::FrameworkDescription)"
+
+Write-Host ""
+Write-Host "4. ESSAYER CHARGER LA DLL" -ForegroundColor Yellow
+Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+try {
+    Write-Host "Chargement de l'assembly..."
+    [Reflection.Assembly]::LoadFrom((Resolve-Path $dllPath).Path) | Out-Null
+    Write-Host "✓ DLL CHARGÉE AVEC SUCCÈS" -ForegroundColor Green
+}
+catch {
+    Write-Host "✗ ERREUR CHARGEMENT DLL :" -ForegroundColor Red
+    Write-Host "   Type : $($_.Exception.GetType().Name)"
+    Write-Host "   Message : $($_.Exception.Message)"
+    
+    if ($_.Exception.InnerException) {
+        Write-Host "   Détail : $($_.Exception.InnerException.Message)"
+    }
+    
+    Write-Host ""
+    Write-Host "SOLUTIONS POSSIBLES :" -ForegroundColor Yellow
+    Write-Host "1. DLL corrompue → Télécharger à nouveau"
+    Write-Host "2. Mauvaise architecture (32/64 bit) → Vérifier version"
+    Write-Host "3. Dépendance manquante → Installer .NET Framework"
+    Write-Host "4. Permissions → Lancer en Admin"
+    exit 1
+}
+
+Write-Host ""
+Write-Host "5. TESTER CREATION D'UN QR CODE" -ForegroundColor Yellow
+Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+try {
+    Write-Host "Création d'un QR code test..."
+    
+    $gen = New-Object QRCoder.QRCodeGenerator
+    Write-Host "✓ QRCodeGenerator créé"
+    
+    $eccLevel = [QRCoder.QRCodeGenerator]::ECCLevel.Q
+    $qr = $gen.CreateQrCode("TEST_QRCODE_12345", $eccLevel)
+    Write-Host "✓ QR Code généré"
+    
+    $png = New-Object QRCoder.PngByteQRCode -ArgumentList $qr
+    Write-Host "✓ PNG Byte QRCode créé"
+    
+    $bytes = $png.GetGraphic(10)
+    Write-Host "✓ Graphique PNG obtenu ($($bytes.Length) bytes)"
+    
+    # Sauvegarder test
+    $testPath = ".\qrcode_test.png"
+    [IO.File]::WriteAllBytes($testPath, $bytes)
+    
+    Write-Host "✓ Fichier test créé : $testPath" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "════════════════════════════════════════════════════════" -ForegroundColor Green
+    Write-Host "✓✓✓ SUCCÈS - TOUT FONCTIONNE ! ✓✓✓" -ForegroundColor Green
+    Write-Host "════════════════════════════════════════════════════════" -ForegroundColor Green
+}
+catch {
+    Write-Host "✗ ERREUR CREATION QR CODE :" -ForegroundColor Red
+    Write-Host "   Type : $($_.Exception.GetType().Name)"
+    Write-Host "   Message : $($_.Exception.Message)"
+    
+    if ($_.Exception.InnerException) {
+        Write-Host "   Détail : $($_.Exception.InnerException.Message)"
+    }
+    
+    Write-Host ""
+    Write-Host "SOLUTIONS :" -ForegroundColor Yellow
+    Write-Host "1. Essayer un autre contenu pour le QR (plus court)"
+    Write-Host "2. Vérifier les propriétés ECCLevel"
+    Write-Host "3. Vérifier que QRCoder.dll v1.6.0 est correcte"
+    exit 1
+}
+
+Write-Host ""
+Write-Host "════════════════════════════════════════════════════════" -ForegroundColor Green
+Write-Host "✓ DIAGNOSTIC COMPLET PASSÉ" -ForegroundColor Green
+Write-Host "════════════════════════════════════════════════════════" -ForegroundColor Green
+Write-Host ""
+Write-Host "La DLL se charge correctement !"
+Write-Host "Tu peux maintenant relancer QRToken-GUI-Secure.ps1"
+Write-Host ""
