@@ -19,17 +19,12 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 # ============================================================================
-# Vérification de la connexion PnP existante dans CETTE fenêtre PowerShell
-# (l'outil ne se connecte pas lui-même, il réutilise la connexion en cours)
+# Détection d'une connexion PnP existante dans CETTE fenêtre PowerShell
+# (optionnelle : l'outil permet aussi d'en créer une nouvelle depuis l'interface)
 # ============================================================================
-try {
-    $CurrentPnPConnection = Get-PnPConnection -ErrorAction Stop
-} catch {
-    [System.Windows.Forms.MessageBox]::Show(
-        "Aucune connexion PnP active détectée dans cette fenêtre PowerShell.`n`nMerci d'exécuter d'abord, dans CETTE MÊME fenêtre :`nConnect-PnPOnline -Url https://tenant.sharepoint.com/sites/MonSite -Interactive`n`npuis relance ce script.",
-        "Connexion PnP requise", 'OK', 'Error') | Out-Null
-    return
-}
+$script:ReusedConnection = $null
+try { $script:ReusedConnection = Get-PnPConnection -ErrorAction Stop } catch { $script:ReusedConnection = $null }
+$script:CurrentPnPConnection = $script:ReusedConnection
 
 # ============================================================================
 # Fonctions utilitaires
@@ -73,6 +68,7 @@ $sync = [hashtable]::Synchronized(@{
     Done          = $false
     AllDone       = $false
     Cancel        = $false
+    AuditSummary  = $null
     Params        = @{}
 })
 
@@ -81,7 +77,7 @@ $sync = [hashtable]::Synchronized(@{
 # ============================================================================
 $form                     = New-Object System.Windows.Forms.Form
 $form.Text                = "PnP Bulk Move - Déplacement massif SharePoint"
-$form.Size                = New-Object System.Drawing.Size(780, 730)
+$form.Size                = New-Object System.Drawing.Size(780, 905)
 $form.StartPosition       = "CenterScreen"
 $form.FormBorderStyle     = 'FixedDialog'
 $form.MaximizeBox         = $false
@@ -91,15 +87,15 @@ $form.Font                = New-Object System.Drawing.Font("Segoe UI", 9)
 $gbConn = New-Object System.Windows.Forms.GroupBox
 $gbConn.Text = "Connexion et emplacements"
 $gbConn.Location = New-Object System.Drawing.Point(15, 15)
-$gbConn.Size = New-Object System.Drawing.Size(735, 190)
+$gbConn.Size = New-Object System.Drawing.Size(735, 290)
 $form.Controls.Add($gbConn)
 
 function New-LabeledTextBox {
-    param($Parent, $LabelText, $Y, $Width = 590)
+    param($Parent, $LabelText, $Y, $Width = 700)
     $lbl = New-Object System.Windows.Forms.Label
     $lbl.Text = $LabelText
     $lbl.Location = New-Object System.Drawing.Point(10, $Y)
-    $lbl.Size = New-Object System.Drawing.Size(590, 18)
+    $lbl.Size = New-Object System.Drawing.Size(700, 18)
     $Parent.Controls.Add($lbl)
 
     $tb = New-Object System.Windows.Forms.TextBox
@@ -109,28 +105,120 @@ function New-LabeledTextBox {
     return $tb
 }
 
-$txtSite   = New-LabeledTextBox -Parent $gbConn -LabelText "URL du site (connexion active réutilisée - lecture seule)" -Y 15
-$txtSite.Text = $CurrentPnPConnection.Url
-$txtSite.ReadOnly = $true
-$txtSite.BackColor = [System.Drawing.Color]::WhiteSmoke
+$radioReuse = New-Object System.Windows.Forms.RadioButton
+$radioReuse.Text = "Réutiliser la connexion PnP active de cette fenêtre PowerShell"
+$radioReuse.Location = New-Object System.Drawing.Point(10, 20)
+$radioReuse.Size = New-Object System.Drawing.Size(700, 20)
+$gbConn.Controls.Add($radioReuse)
 
-$txtSource = New-LabeledTextBox -Parent $gbConn -LabelText "Dossier SOURCE (chemin relatif serveur, ex: /sites/MonSite/Shared Documents/Dossier)" -Y 65
-$txtDest   = New-LabeledTextBox -Parent $gbConn -LabelText "Dossier DESTINATION (URL complète ou chemin relatif serveur - les deux fonctionnent)" -Y 115
+$radioNew = New-Object System.Windows.Forms.RadioButton
+$radioNew.Text = "Se connecter maintenant (nouvelle connexion)"
+$radioNew.Location = New-Object System.Drawing.Point(10, 42)
+$radioNew.Size = New-Object System.Drawing.Size(700, 20)
+$gbConn.Controls.Add($radioNew)
 
-try { $connUser = (Get-PnPContext).Credentials.UserPrincipalName } catch { $connUser = $null }
-if (-not $connUser) { $connUser = "session active" }
+$txtSite = New-LabeledTextBox -Parent $gbConn -LabelText "URL du site" -Y 68 -Width 590
+$txtSource = New-LabeledTextBox -Parent $gbConn -LabelText "Dossier SOURCE (chemin relatif serveur, ex: /sites/MonSite/Shared Documents/Dossier)" -Y 168
+$txtDest   = New-LabeledTextBox -Parent $gbConn -LabelText "Dossier DESTINATION (URL complète ou chemin relatif serveur - les deux fonctionnent)" -Y 216
+
+$lblClientId = New-Object System.Windows.Forms.Label
+$lblClientId.Text = "Client ID Entra ID (app enregistrée, requis pour une nouvelle connexion - le client public PnP a été retiré par Microsoft)"
+$lblClientId.Location = New-Object System.Drawing.Point(10, 115)
+$lblClientId.Size = New-Object System.Drawing.Size(700, 18)
+$gbConn.Controls.Add($lblClientId)
+
+$txtClientId = New-Object System.Windows.Forms.TextBox
+$txtClientId.Location = New-Object System.Drawing.Point(10, 135)
+$txtClientId.Size = New-Object System.Drawing.Size(460, 22)
+$gbConn.Controls.Add($txtClientId)
+
+$btnConnect = New-Object System.Windows.Forms.Button
+$btnConnect.Text = "Se connecter"
+$btnConnect.Location = New-Object System.Drawing.Point(480, 134)
+$btnConnect.Size = New-Object System.Drawing.Size(120, 24)
+$gbConn.Controls.Add($btnConnect)
+
 $lblConnInfo = New-Object System.Windows.Forms.Label
-$lblConnInfo.Text = "Connexion réutilisée : $connUser"
-$lblConnInfo.Location = New-Object System.Drawing.Point(10, 165)
+$lblConnInfo.Location = New-Object System.Drawing.Point(10, 262)
 $lblConnInfo.Size = New-Object System.Drawing.Size(715, 18)
 $lblConnInfo.ForeColor = [System.Drawing.Color]::DarkGreen
 $gbConn.Controls.Add($lblConnInfo)
 
+function Set-ConnectionModeUI {
+    if ($radioReuse.Checked) {
+        $txtSite.ReadOnly = $true
+        $txtSite.BackColor = [System.Drawing.Color]::WhiteSmoke
+        $txtSite.Text = $script:ReusedConnection.Url
+        $txtClientId.Enabled = $false
+        $btnConnect.Enabled = $false
+        $script:CurrentPnPConnection = $script:ReusedConnection
+        try { $u = (Get-PnPContext -Connection $script:ReusedConnection).Credentials.UserPrincipalName } catch { $u = $null }
+        if (-not $u) { $u = "session active" }
+        $lblConnInfo.Text = "Connexion réutilisée : $u"
+        $lblConnInfo.ForeColor = [System.Drawing.Color]::DarkGreen
+    } else {
+        $txtSite.ReadOnly = $false
+        $txtSite.BackColor = [System.Drawing.Color]::White
+        $txtClientId.Enabled = $true
+        $btnConnect.Enabled = $true
+        $lblConnInfo.Text = "Renseigne l'URL du site + le Client ID, puis clique sur 'Se connecter'."
+        $lblConnInfo.ForeColor = [System.Drawing.Color]::DarkOrange
+    }
+}
+
+if ($script:ReusedConnection) {
+    $radioReuse.Checked = $true
+} else {
+    $radioReuse.Enabled = $false
+    $radioNew.Checked = $true
+}
+$radioReuse.Add_CheckedChanged({ if ($radioReuse.Checked) { Set-ConnectionModeUI } })
+$radioNew.Add_CheckedChanged({ if ($radioNew.Checked) { Set-ConnectionModeUI } })
+Set-ConnectionModeUI
+
+$btnConnect.Add_Click({
+    if ([string]::IsNullOrWhiteSpace($txtSite.Text)) {
+        [System.Windows.Forms.MessageBox]::Show("Renseigne l'URL du site.", "Champ manquant", 'OK', 'Warning') | Out-Null
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($txtClientId.Text)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Un Client ID d'application Entra ID est requis.`n`nLe client public multi-tenant 'PnP Management Shell' a été retiré par Microsoft en septembre 2024 : il faut désormais ta propre application enregistrée.`n`nTu peux en créer une automatiquement avec :`nRegister-PnPEntraIDAppForInteractiveLogin -ApplicationName ""MonApp"" -Tenant tontenant.onmicrosoft.com",
+            "Client ID requis", 'OK', 'Warning') | Out-Null
+        return
+    }
+    $lblConnInfo.Text = "Connexion en cours..."
+    $lblConnInfo.ForeColor = [System.Drawing.Color]::DarkOrange
+    $btnConnect.Enabled = $false
+    [System.Windows.Forms.Application]::DoEvents()
+    try {
+        $newConn = Connect-PnPOnline -Url $txtSite.Text -ClientId $txtClientId.Text -Interactive -ReturnConnection -ErrorAction Stop
+    } catch {
+        try {
+            $lblConnInfo.Text = "Authentification interactive impossible, tentative DeviceLogin (suis les instructions dans une fenêtre de console)..."
+            [System.Windows.Forms.Application]::DoEvents()
+            $newConn = Connect-PnPOnline -Url $txtSite.Text -ClientId $txtClientId.Text -DeviceLogin -ReturnConnection -ErrorAction Stop
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Échec de connexion :`n$($_.Exception.Message)", "Erreur", 'OK', 'Error') | Out-Null
+            $lblConnInfo.Text = "Échec de connexion."
+            $lblConnInfo.ForeColor = [System.Drawing.Color]::Red
+            $btnConnect.Enabled = $true
+            return
+        }
+    }
+    $script:CurrentPnPConnection = $newConn
+    try { $u = (Get-PnPContext -Connection $newConn).Credentials.UserPrincipalName } catch { $u = $null }
+    if (-not $u) { $u = "connecté" }
+    $lblConnInfo.Text = "Nouvelle connexion établie : $u"
+    $lblConnInfo.ForeColor = [System.Drawing.Color]::DarkGreen
+    $btnConnect.Enabled = $true
+})
+
 # --- GroupBox Fichiers / paramètres de traitement ---
 $gbParams = New-Object System.Windows.Forms.GroupBox
 $gbParams.Text = "Liste des fichiers et paramètres"
-$gbParams.Location = New-Object System.Drawing.Point(15, 215)
-$gbParams.Size = New-Object System.Drawing.Size(735, 165)
+$gbParams.Location = New-Object System.Drawing.Point(15, 315)
+$gbParams.Size = New-Object System.Drawing.Size(735, 190)
 $form.Controls.Add($gbParams)
 
 $lblFileList = New-Object System.Windows.Forms.Label
@@ -197,10 +285,16 @@ $chkSimulate.Location = New-Object System.Drawing.Point(150, 137)
 $chkSimulate.Size = New-Object System.Drawing.Size(560, 20)
 $gbParams.Controls.Add($chkSimulate)
 
+$chkVerbose = New-Object System.Windows.Forms.CheckBox
+$chkVerbose.Text = "Mode verbose (détail fichier par fichier : lancement des jobs, résultats individuels, chronométrage)"
+$chkVerbose.Location = New-Object System.Drawing.Point(10, 160)
+$chkVerbose.Size = New-Object System.Drawing.Size(700, 20)
+$gbParams.Controls.Add($chkVerbose)
+
 # --- Sélection manuelle du paquet à traiter ---
 $gbBatchSelect = New-Object System.Windows.Forms.GroupBox
 $gbBatchSelect.Text = "Paquet à traiter"
-$gbBatchSelect.Location = New-Object System.Drawing.Point(15, 390)
+$gbBatchSelect.Location = New-Object System.Drawing.Point(15, 515)
 $gbBatchSelect.Size = New-Object System.Drawing.Size(735, 55)
 $form.Controls.Add($gbBatchSelect)
 
@@ -262,7 +356,7 @@ $btnSuggest.Add_Click({ Update-BatchSuggestion })
 # --- Boutons d'action ---
 $btnStart = New-Object System.Windows.Forms.Button
 $btnStart.Text = "Traiter le paquet sélectionné"
-$btnStart.Location = New-Object System.Drawing.Point(15, 455)
+$btnStart.Location = New-Object System.Drawing.Point(15, 580)
 $btnStart.Size = New-Object System.Drawing.Size(200, 32)
 $btnStart.BackColor = [System.Drawing.Color]::FromArgb(46, 125, 50)
 $btnStart.ForeColor = [System.Drawing.Color]::White
@@ -270,38 +364,46 @@ $form.Controls.Add($btnStart)
 
 $btnStop = New-Object System.Windows.Forms.Button
 $btnStop.Text = "Arrêter"
-$btnStop.Location = New-Object System.Drawing.Point(225, 455)
+$btnStop.Location = New-Object System.Drawing.Point(225, 580)
 $btnStop.Size = New-Object System.Drawing.Size(120, 32)
 $btnStop.Enabled = $false
 $form.Controls.Add($btnStop)
 
 $btnResetResume = New-Object System.Windows.Forms.Button
 $btnResetResume.Text = "Réinitialiser reprise"
-$btnResetResume.Location = New-Object System.Drawing.Point(355, 455)
+$btnResetResume.Location = New-Object System.Drawing.Point(355, 580)
 $btnResetResume.Size = New-Object System.Drawing.Size(150, 32)
 $form.Controls.Add($btnResetResume)
 
+$btnAudit = New-Object System.Windows.Forms.Button
+$btnAudit.Text = "Auditer le dossier destination"
+$btnAudit.Location = New-Object System.Drawing.Point(15, 617)
+$btnAudit.Size = New-Object System.Drawing.Size(490, 30)
+$btnAudit.BackColor = [System.Drawing.Color]::FromArgb(21, 101, 192)
+$btnAudit.ForeColor = [System.Drawing.Color]::White
+$form.Controls.Add($btnAudit)
+
 # --- Progression ---
 $progressBar = New-Object System.Windows.Forms.ProgressBar
-$progressBar.Location = New-Object System.Drawing.Point(15, 500)
+$progressBar.Location = New-Object System.Drawing.Point(15, 657)
 $progressBar.Size = New-Object System.Drawing.Size(735, 22)
 $form.Controls.Add($progressBar)
 
 $lblStatus = New-Object System.Windows.Forms.Label
 $lblStatus.Text = "En attente..."
-$lblStatus.Location = New-Object System.Drawing.Point(15, 525)
+$lblStatus.Location = New-Object System.Drawing.Point(15, 682)
 $lblStatus.Size = New-Object System.Drawing.Size(735, 20)
 $form.Controls.Add($lblStatus)
 
 # --- Journal ---
 $lblLog = New-Object System.Windows.Forms.Label
 $lblLog.Text = "Journal :"
-$lblLog.Location = New-Object System.Drawing.Point(15, 550)
+$lblLog.Location = New-Object System.Drawing.Point(15, 707)
 $lblLog.Size = New-Object System.Drawing.Size(200, 18)
 $form.Controls.Add($lblLog)
 
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(15, 570)
+$txtLog.Location = New-Object System.Drawing.Point(15, 727)
 $txtLog.Size = New-Object System.Drawing.Size(735, 140)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = 'Vertical'
@@ -319,6 +421,7 @@ $scriptBlock = {
 
     $p = $sync.Params
     function Log { param($msg) $sync.LogQueue.Enqueue("$(Get-Date -Format 'HH:mm:ss')  $msg") }
+    function VLog { param($msg) if ($p.Verbose) { $sync.LogQueue.Enqueue("$(Get-Date -Format 'HH:mm:ss')      [verbose] $msg") } }
 
     try {
         Import-Module PnP.PowerShell -ErrorAction Stop
@@ -330,6 +433,8 @@ $scriptBlock = {
         function Get-RelativeUrl { param($Url) ($Url -replace '^https://[^/]+', '').TrimEnd('/') }
         $srcFolder  = Get-RelativeUrl $p.SourceFolder
         $destFolder = Get-RelativeUrl $p.DestFolder
+        VLog "Dossier source normalisé   : $srcFolder"
+        VLog "Dossier destination normalisé : $destFolder"
 
         $allFiles = Get-Content $p.FileListPath | Where-Object { $_.Trim() -ne "" }
         $total = $allFiles.Count
@@ -354,13 +459,71 @@ $scriptBlock = {
             return @()
         }
 
+        # Audit "intelligent" : UN SEUL appel de listing par dossier au lieu d'un Get-PnPFile
+        # par fichier (c'est ce qui rendait la validation par paquet peu fiable : centaines
+        # d'appels réseau successifs = plus de risques de timeout/throttling/erreurs transitoires).
+        function Get-FolderFileSet {
+            param($FolderRelativeUrl, $Connection)
+            $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            try {
+                $items = Get-PnPFolderItem -FolderSiteRelativeUrl $FolderRelativeUrl -ItemType File -Connection $Connection -ErrorAction Stop
+                foreach ($it in $items) { [void]$set.Add($it.Name) }
+            } catch {
+                throw "Impossible de lister le dossier '$FolderRelativeUrl' : $($_.Exception.Message)"
+            }
+            return $set
+        }
+
         $completedBatches = Get-CompletedBatches -ResumeFile $p.ResumeFile
 
         if (-not (Test-Path $p.LogFile)) {
             "BatchNumber,FileName,Status,Detail,Timestamp" | Out-File -FilePath $p.LogFile -Encoding UTF8
         }
 
-        if ($p.BatchNumber -lt 1 -or $p.BatchNumber -gt $totalBatches) {
+        if ($p.Mode -eq 'Audit') {
+            Log "=== AUDIT COMPLET du dossier destination en cours (listing intégral source + destination) ==="
+            $swList = [System.Diagnostics.Stopwatch]::StartNew()
+            $destSet = Get-FolderFileSet -FolderRelativeUrl $destFolder -Connection $conn
+            Log "  Destination : $($destSet.Count) fichier(s) trouvé(s)."
+            VLog "Listing destination effectué en $($swList.Elapsed.TotalSeconds.ToString('0.0'))s"
+            $swList.Restart()
+            $srcSet = Get-FolderFileSet -FolderRelativeUrl $srcFolder -Connection $conn
+            Log "  Source : $($srcSet.Count) fichier(s) trouvé(s)."
+            VLog "Listing source effectué en $($swList.Elapsed.TotalSeconds.ToString('0.0'))s"
+
+            $okCount = 0; $pendingCount = 0; $dupCount = 0; $missingCount = 0
+            $auditFile = $p.AuditFile
+            "FileName,InSource,InDestination,Status,Timestamp" | Out-File -FilePath $auditFile -Encoding UTF8
+
+            $swCompare = [System.Diagnostics.Stopwatch]::StartNew()
+            $processed = 0
+            foreach ($f in $allFiles) {
+                $inDest = $destSet.Contains($f)
+                $inSrc  = $srcSet.Contains($f)
+                if ($inDest -and -not $inSrc) { $status = "OK_DEPLACE"; $okCount++ }
+                elseif ($inDest -and $inSrc)  { $status = "DUPLIQUE_AUX_DEUX_ENDROITS"; $dupCount++ }
+                elseif (-not $inDest -and $inSrc) { $status = "PAS_ENCORE_DEPLACE"; $pendingCount++ }
+                else { $status = "INTROUVABLE_AUX_DEUX_ENDROITS"; $missingCount++ }
+                Add-Content -Path $auditFile -Value ('{0},{1},{2},{3},{4}' -f $f, $inSrc, $inDest, $status, (Get-Date -Format 'o'))
+                $processed++
+                if ($p.Verbose -and ($processed % 5000 -eq 0)) {
+                    VLog "Comparaison : $processed / $($allFiles.Count) fichiers traités ($($swCompare.Elapsed.TotalSeconds.ToString('0.0'))s écoulées)"
+                }
+            }
+            VLog "Comparaison complète effectuée en $($swCompare.Elapsed.TotalSeconds.ToString('0.0'))s"
+
+            $sync.AuditSummary = @{
+                Total      = $allFiles.Count
+                OK         = $okCount
+                Pending    = $pendingCount
+                Duplicate  = $dupCount
+                Missing    = $missingCount
+                ReportPath = $auditFile
+            }
+            Log "=== AUDIT TERMINÉ === OK: $okCount | Pas encore déplacés: $pendingCount | Doublons: $dupCount | Introuvables: $missingCount"
+            Log "Rapport détaillé : $auditFile"
+        }
+        elseif ($p.BatchNumber -lt 1 -or $p.BatchNumber -gt $totalBatches) {
             Log "ERREUR : le numéro de paquet demandé ($($p.BatchNumber)) est hors limites (1 à $totalBatches)."
             $sync.CurrentBatch = 0
         }
@@ -391,6 +554,7 @@ $scriptBlock = {
             }
             else {
                 # --- Lancement asynchrone d'un job de déplacement PAR FICHIER (NoWait) ---
+                $swJobs = [System.Diagnostics.Stopwatch]::StartNew()
                 $jobs = @{}
                 foreach ($f in $batchFiles) {
                     if ($sync.Cancel) { break }
@@ -398,39 +562,55 @@ $scriptBlock = {
                     try {
                         $job = Move-PnPFile -SourceUrl $srcUrl -TargetUrl $destFolder -Overwrite -Force -NoWait -Connection $conn -ErrorAction Stop
                         $jobs[$f] = $job
+                        VLog "Job lancé : $srcUrl -> $destFolder"
                     } catch {
                         Add-Content -Path $p.LogFile -Value ('{0},{1},{2},"{3}",{4}' -f $batchNumber, $f, "JOB_START_FAILED", $_.Exception.Message, (Get-Date -Format 'o'))
                         $sync.GlobalFailed++
+                        VLog "ÉCHEC lancement pour $f : $($_.Exception.Message)"
                     }
                 }
+                VLog "Tous les jobs du paquet lancés en $($swJobs.Elapsed.TotalSeconds.ToString('0.0'))s ($($jobs.Count) job(s))."
 
                 # --- Attente de la fin de chaque job du paquet ---
+                $swWait = [System.Diagnostics.Stopwatch]::StartNew()
                 foreach ($f in $jobs.Keys) {
                     try {
                         Receive-PnPCopyMoveJobStatus -Job $jobs[$f] -Wait -Connection $conn -ErrorAction Stop | Out-Null
+                        VLog "Job terminé : $f"
                     } catch {
                         Log "  Erreur statut job pour $f : $($_.Exception.Message)"
                     }
                 }
+                VLog "Attente des jobs terminée en $($swWait.Elapsed.TotalSeconds.ToString('0.0'))s."
 
+                $swAudit = [System.Diagnostics.Stopwatch]::StartNew()
                 $batchSuccess = 0; $batchFailed = 0
-                foreach ($f in $batchFiles) {
-                    $destCheckUrl   = "$destFolder/$f".Replace("//", "/")
-                    $sourceCheckUrl = "$srcFolder/$f".Replace("//", "/")
-                    $existsAtDest = $null; $existsAtSrc = $null
-                    try { $existsAtDest = Get-PnPFile -Url $destCheckUrl -AsFile -Connection $conn -ErrorAction Stop } catch {}
-                    try { $existsAtSrc  = Get-PnPFile -Url $sourceCheckUrl -AsFile -Connection $conn -ErrorAction Stop } catch {}
+                try {
+                    $destSet = Get-FolderFileSet -FolderRelativeUrl $destFolder -Connection $conn
+                    $srcSet  = Get-FolderFileSet -FolderRelativeUrl $srcFolder -Connection $conn
+                    VLog "Listing destination : $($destSet.Count) fichier(s) — Listing source : $($srcSet.Count) fichier(s) (en $($swAudit.Elapsed.TotalSeconds.ToString('0.0'))s)"
 
-                    if ($existsAtDest -and -not $existsAtSrc) {
-                        Add-Content -Path $p.LogFile -Value ('{0},{1},{2},"{3}",{4}' -f $batchNumber, $f, "OK", "Déplacé et validé", (Get-Date -Format 'o'))
-                        $batchSuccess++
-                    } elseif ($existsAtDest -and $existsAtSrc) {
-                        Add-Content -Path $p.LogFile -Value ('{0},{1},{2},"{3}",{4}' -f $batchNumber, $f, "DUPLICATE", "Présent aux deux emplacements", (Get-Date -Format 'o'))
-                        $batchFailed++
-                    } else {
-                        Add-Content -Path $p.LogFile -Value ('{0},{1},{2},"{3}",{4}' -f $batchNumber, $f, "MISSING", "Introuvable à destination", (Get-Date -Format 'o'))
-                        $batchFailed++
+                    foreach ($f in $batchFiles) {
+                        $inDest = $destSet.Contains($f)
+                        $inSrc  = $srcSet.Contains($f)
+
+                        if ($inDest -and -not $inSrc) {
+                            Add-Content -Path $p.LogFile -Value ('{0},{1},{2},"{3}",{4}' -f $batchNumber, $f, "OK", "Déplacé et validé", (Get-Date -Format 'o'))
+                            $batchSuccess++
+                            VLog "OK        : $f"
+                        } elseif ($inDest -and $inSrc) {
+                            Add-Content -Path $p.LogFile -Value ('{0},{1},{2},"{3}",{4}' -f $batchNumber, $f, "DUPLICATE", "Présent aux deux emplacements", (Get-Date -Format 'o'))
+                            $batchFailed++
+                            VLog "DOUBLON   : $f (présent source ET destination)"
+                        } else {
+                            Add-Content -Path $p.LogFile -Value ('{0},{1},{2},"{3}",{4}' -f $batchNumber, $f, "MISSING", "Introuvable à destination", (Get-Date -Format 'o'))
+                            $batchFailed++
+                            VLog "MANQUANT  : $f (introuvable aux deux emplacements)"
+                        }
                     }
+                } catch {
+                    Log "  ERREUR lors de l'audit du paquet : $($_.Exception.Message)"
+                    $batchFailed = $batchFiles.Count
                 }
 
                 $sync.GlobalSuccess += $batchSuccess
@@ -488,22 +668,34 @@ $timer.Add_Tick({
             $timer.Stop()
             $btnStart.Enabled = $true
             $btnStop.Enabled = $false
+            $btnAudit.Enabled = $true
             try { $script:ps.EndInvoke($script:handle) } catch {}
             try { $script:ps.Dispose() } catch {}
             try { $script:runspace.Close() } catch {}
 
-            $btnStart.Text = "Traiter le paquet sélectionné"
-
-            if ($sync.Cancel) {
-                # rien de plus, le numéro reste tel quel pour reprendre ce paquet
+            if ($sync.Params.Mode -eq 'Audit') {
+                if ($sync.AuditSummary) {
+                    $s = $sync.AuditSummary
+                    [System.Windows.Forms.MessageBox]::Show(
+                        "Audit terminé.`n`nTotal fichiers de la liste : $($s.Total)`nDéplacés et validés (OK) : $($s.OK)`nPas encore déplacés : $($s.Pending)`nDoublons (présents aux 2 endroits) : $($s.Duplicate)`nIntrouvables (aux 2 endroits) : $($s.Missing)`n`nRapport détaillé : $($s.ReportPath)",
+                        "Audit terminé", 'OK', 'Information') | Out-Null
+                } else {
+                    [System.Windows.Forms.MessageBox]::Show("L'audit a échoué. Consulte le journal pour le détail.", "Audit incomplet", 'OK', 'Warning') | Out-Null
+                }
             }
-            elseif ($sync.AllDone) {
-                $btnStart.Enabled = $false
-                [System.Windows.Forms.MessageBox]::Show(
-                    "Tous les paquets ont été traités.`nOK cumulé : $($sync.GlobalSuccess)`nÉchecs cumulés : $($sync.GlobalFailed)`nLog : $($sync.Params.LogFile)",
-                    "Terminé", 'OK', 'Information') | Out-Null
+            else {
+                $btnStart.Text = "Traiter le paquet sélectionné"
+                if ($sync.Cancel) {
+                    # rien de plus, le numéro reste tel quel pour reprendre ce paquet
+                }
+                elseif ($sync.AllDone) {
+                    $btnStart.Enabled = $false
+                    [System.Windows.Forms.MessageBox]::Show(
+                        "Tous les paquets ont été traités.`nOK cumulé : $($sync.GlobalSuccess)`nÉchecs cumulés : $($sync.GlobalFailed)`nLog : $($sync.Params.LogFile)",
+                        "Terminé", 'OK', 'Information') | Out-Null
+                }
+                Update-BatchSuggestion
             }
-            Update-BatchSuggestion
         }
     } catch {
         # Ne jamais laisser une exception du Timer remonter (évite la cascade de popups d'erreur Windows)
@@ -528,6 +720,10 @@ $btnStart.Add_Click({
         [System.Windows.Forms.MessageBox]::Show("Le fichier liste est introuvable :`n$($txtFileList.Text)", "Fichier introuvable", 'OK', 'Error') | Out-Null
         return
     }
+    if (-not $script:CurrentPnPConnection) {
+        [System.Windows.Forms.MessageBox]::Show("Aucune connexion active. Choisis 'Réutiliser' ou clique sur 'Se connecter'.", "Connexion requise", 'OK', 'Warning') | Out-Null
+        return
+    }
 
     $logFolder = $txtLogFolder.Text
     if (-not (Test-Path $logFolder)) { New-Item -ItemType Directory -Path $logFolder -Force | Out-Null }
@@ -550,8 +746,10 @@ $btnStart.Add_Click({
     }
     $sync.Done   = $false
     $sync.Cancel = $false
+    $sync.AuditSummary = $null
     $script:notifiedDone = $false
     $sync.Params = @{
+        Mode         = 'Batch'
         SiteUrl      = $txtSite.Text
         SourceFolder = $txtSource.Text
         DestFolder   = $txtDest.Text
@@ -560,11 +758,73 @@ $btnStart.Add_Click({
         BatchNumber  = [int]$numBatchToRun.Value
         ResumeFile   = $resumeFile
         LogFile      = $logFile
-        Connection   = $CurrentPnPConnection
+        Connection   = $script:CurrentPnPConnection
         Simulate     = $chkSimulate.Checked
+        Verbose      = $chkVerbose.Checked
     }
 
     $btnStart.Enabled = $false
+    $btnStop.Enabled  = $true
+    $btnAudit.Enabled = $false
+
+    $script:runspace = [runspacefactory]::CreateRunspace()
+    $script:runspace.ApartmentState = "STA"
+    $script:runspace.ThreadOptions  = "ReuseThread"
+    $script:runspace.Open()
+
+    $script:ps = [powershell]::Create()
+    $script:ps.Runspace = $script:runspace
+    [void]$script:ps.AddScript($scriptBlock).AddArgument($sync)
+    $script:handle = $script:ps.BeginInvoke()
+
+    $timer.Start()
+})
+
+$btnAudit.Add_Click({
+    if ([string]::IsNullOrWhiteSpace($txtSite.Text) -or
+        [string]::IsNullOrWhiteSpace($txtSource.Text) -or
+        [string]::IsNullOrWhiteSpace($txtDest.Text) -or
+        [string]::IsNullOrWhiteSpace($txtFileList.Text)) {
+        [System.Windows.Forms.MessageBox]::Show("Merci de renseigner tous les champs (site, source, destination, fichier liste).", "Champs manquants", 'OK', 'Warning') | Out-Null
+        return
+    }
+    if (-not (Test-Path $txtFileList.Text)) {
+        [System.Windows.Forms.MessageBox]::Show("Le fichier liste est introuvable :`n$($txtFileList.Text)", "Fichier introuvable", 'OK', 'Error') | Out-Null
+        return
+    }
+    if (-not $script:CurrentPnPConnection) {
+        [System.Windows.Forms.MessageBox]::Show("Aucune connexion active. Choisis 'Réutiliser' ou clique sur 'Se connecter'.", "Connexion requise", 'OK', 'Warning') | Out-Null
+        return
+    }
+
+    $logFolder = $txtLogFolder.Text
+    if (-not (Test-Path $logFolder)) { New-Item -ItemType Directory -Path $logFolder -Force | Out-Null }
+    $hash      = Get-StateHash -Source $txtSource.Text -Destination $txtDest.Text
+    $auditFile = Join-Path $logFolder "Audit_$hash`_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+    $logFile   = Join-Path $logFolder "MoveLog_$hash.csv"
+
+    $txtLog.AppendText("--- Lancement d'un audit complet (indépendant des paquets) ---`r`n")
+    $sync.Done   = $false
+    $sync.Cancel = $false
+    $sync.AuditSummary = $null
+    $script:notifiedDone = $false
+    $sync.Params = @{
+        Mode         = 'Audit'
+        SourceFolder = $txtSource.Text
+        DestFolder   = $txtDest.Text
+        FileListPath = $txtFileList.Text
+        BatchSize    = [int]$numBatch.Value
+        BatchNumber  = 1
+        ResumeFile   = (Join-Path $logFolder "Resume_$hash.json")
+        LogFile      = $logFile
+        AuditFile    = $auditFile
+        Connection   = $script:CurrentPnPConnection
+        Simulate     = $false
+        Verbose      = $chkVerbose.Checked
+    }
+
+    $btnStart.Enabled = $false
+    $btnAudit.Enabled = $false
     $btnStop.Enabled  = $true
 
     $script:runspace = [runspacefactory]::CreateRunspace()
