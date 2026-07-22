@@ -57,9 +57,32 @@ param(
 )
 
 # ---------- Connexion ----------
-Write-Host "Connexion à $SiteUrl ..." -ForegroundColor Cyan
-Connect-PnPOnline -Url $SiteUrl -Interactive -ErrorAction Stop
-Write-Host "Connecté." -ForegroundColor Green
+# Réutilise la connexion PnP déjà active dans la session (si elle existe et pointe
+# vers le bon site) plutôt que de forcer une reconnexion interactive à chaque lancement.
+$needsConnection = $true
+
+try {
+    $currentConnection = Get-PnPConnection -ErrorAction Stop
+    if ($currentConnection -and $currentConnection.Url -eq $SiteUrl) {
+        # Test rapide que la connexion est toujours valide (token non expiré, etc.)
+        Get-PnPWeb -ErrorAction Stop | Out-Null
+        Write-Host "Connexion PnP existante réutilisée ($SiteUrl)." -ForegroundColor Green
+        $needsConnection = $false
+    }
+    elseif ($currentConnection) {
+        Write-Host "Une connexion PnP existe mais pointe vers un autre site ($($currentConnection.Url)). Reconnexion nécessaire." -ForegroundColor Yellow
+    }
+}
+catch {
+    # Pas de connexion active, ou connexion expirée/invalide
+    $needsConnection = $true
+}
+
+if ($needsConnection) {
+    Write-Host "Connexion à $SiteUrl ..." -ForegroundColor Cyan
+    Connect-PnPOnline -Url $SiteUrl -Interactive -ErrorAction Stop
+    Write-Host "Connecté." -ForegroundColor Green
+}
 
 # ---------- Reprise ----------
 $lastId = 0
@@ -91,13 +114,18 @@ if (-not $csvExists) {
 
 $totalItems = 0
 $batchNumber = 0
-$fieldsRefXml = ($Fields | ForEach-Object { "<FieldRef Name='$_'/>" }) -join ""
+# IMPORTANT : -Fields n'existe pas dans le parameter set "By Query" de Get-PnPListItem.
+# Les colonnes doivent donc être demandées via <ViewFields> directement dans le CAML.
+$viewFieldsXml = ($Fields | ForEach-Object { "<FieldRef Name='$_'/>" }) -join ""
 
 Write-Host "`nDébut de l'énumération..." -ForegroundColor Cyan
 
 do {
     $camlQuery = @"
 <View Scope='RecursiveAll'>
+  <ViewFields>
+    $viewFieldsXml
+  </ViewFields>
   <Query>
     <Where>
       <Gt>
@@ -120,7 +148,10 @@ do {
     while (-not $success -and $attempt -lt $MaxRetries) {
         $attempt++
         try {
-            $items = Get-PnPListItem -List $ListName -Query $camlQuery -PageSize $PageSize -Fields $Fields -ErrorAction Stop
+            # Pas de -Fields ni de -PageSize ici : incompatibles avec -Query (parameter set "By Query").
+            # Le RowLimit Paged='TRUE' du CAML gère la pagination interne pour CE batch de $PageSize items ;
+            # c'est la boucle do/while + le Gt sur ID qui gère la pagination GLOBALE d'un batch à l'autre.
+            $items = Get-PnPListItem -List $ListName -Query $camlQuery -ErrorAction Stop
             $success = $true
         }
         catch {
